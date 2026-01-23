@@ -8,7 +8,8 @@ beam profile during phase discontinuity propagation.
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from aod_simulation import AODParameters, AODSimulation, plot_time_snapshot
+# from aod_simulation import AODParameters, AODSimulation, plot_time_snapshot
+from aod_simulation_shepard import AODParameters, AODSimulation, plot_time_snapshot
 import os
 
 
@@ -84,7 +85,8 @@ def explore_chirp_rate(chirp_rates_MHz_per_us, n_time_steps=15):
         mid_idx = n_time_steps // 2
         fig = plot_time_snapshot(results, mid_idx, show_phase=True)
         fig.suptitle(f'Chirp rate: {alpha_MHz_us:.3f} MHz/μs', fontsize=14, y=1.02)
-        plt.savefig(f'chirp_comparison_{i}.png', dpi=200, bbox_inches='tight')
+        # plt.savefig(f'chirp_comparison_{i}.png', dpi=200, bbox_inches='tight')
+        plt.savefig(f'chirp_comparison_shepard_{i}.png', dpi=200, bbox_inches='tight')
         plt.close()
     
     # Create comparison plot
@@ -110,7 +112,8 @@ def explore_chirp_rate(chirp_rates_MHz_per_us, n_time_steps=15):
             axes[i].set_xlabel('u [mm]')
     
     plt.tight_layout()
-    plt.savefig('chirp_rate_comparison.png', dpi=200, bbox_inches='tight')
+    # plt.savefig('chirp_rate_comparison.png', dpi=200, bbox_inches='tight')
+    plt.savefig('chirp_rate_shepard_comparison.png', dpi=200, bbox_inches='tight')
     plt.close()
     
     print("\n" + "=" * 70)

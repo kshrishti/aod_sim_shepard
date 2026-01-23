@@ -24,10 +24,12 @@ from matplotlib.colors import PowerNorm
 @dataclass
 class AODParameters:
     """Physical parameters for the AOD system"""
-    
-    n_shepard: int = 5          # number of overlapping components
-    shepard_spacing: float = 2.0  # frequency ratio (2 = octave)
-    shepard_sigma: float = 0.4    # envelope width in log-frequency
+    # Shepard / fading parameters (paper Eq. 2–4)
+    M_shepard: int = 6           # Number of frequency intervals (yields M+1 tones)
+    Delta_f: float = 1.0e6       # Frequency spacing [Hz]
+    eta: float = 0.5             # Fading duty (η = 1/2 in paper)
+    p_fade: float = 1.0          # Fading order p
+    use_schroeder_phase: bool = True
 
     # RF parameters
     f0: float = 50e6          # Start frequency [Hz]
@@ -95,49 +97,72 @@ class AODSimulation:
     def __init__(self, params: AODParameters):
         self.params = params
         
-    def shepard_phase(self, tau: np.ndarray) -> np.ndarray:
+    def fading_amplitude(self, f_n: float) -> float:
         """
-        Shepard–Risset glissando RF phase.
-        Returns the *effective* phase seen by the optical field.
+        Implements Eq. (3) from Dan Stamper-Kurn paper.
         """
         p = self.params
+        M = p.M_shepard
+        eta = p.eta
+        Delta_f = p.Delta_f
+        p_fade = p.p_fade
 
-        # Base chirp
-        f_base = p.f0 + p.alpha * tau
+        f_abs = abs(f_n)
 
-        phase_sum = np.zeros_like(tau, dtype=complex)
+        f_inner = (M - eta) * Delta_f / 2
+        f_outer = (M + eta) * Delta_f / 2
 
-        n_vals = np.arange(-(p.n_shepard//2), p.n_shepard//2 + 1)
+        if f_abs <= f_inner:
+            return 1.0
+        elif f_abs >= f_outer:
+            return 0.0
+        else:
+            arg = (np.pi / (2 * eta)) * (f_abs / Delta_f - M / 2) + np.pi / 4
+            return np.cos(arg)**p_fade
 
-        for n in n_vals:
-            # Log-spaced frequency offsets
-            f_n = f_base * (p.shepard_spacing ** n)
-
-            # Phase of this component
-            phi_n = 2 * np.pi * (
-                f_n * tau
-            )
-
-            # Smooth envelope in log-frequency
-            log_offset = np.log2(f_n / ((p.f0 + p.f1) / 2))
-            envelope = np.exp(-0.5 * (log_offset / p.shepard_sigma)**2)
-
-            phase_sum += envelope * np.exp(-1j * phi_n)
-
-        return np.angle(phase_sum)
-
-
+    def schroeder_phase(self, n: int) -> float:
+        """
+        Eq. (4) from Dan Stamper-Kurn paper: generalized Schroeder phase.
+        """
+        p = self.params
+        M = p.M_shepard
+        return 2 * np.pi * n * (n - 1) / (2 * (M - 1))
+    
     def calculate_phase(self, xi, eta, t, use_frequency_reset=False):
+        """
+        Shepard–fading AOD phase (Eqs. 2–4 of the paper).
+        """
         p = self.params
 
         # Acoustic delay
         tau = t - p.T/2 - xi * p.M / p.V
 
-        if use_frequency_reset:
-            raise NotImplementedError("Reset model disabled for Shepard tones")
+        # Lateral frequency term (1D: x only)
+        f_lat = 0.0  # You can add X(t) later if desired
 
-        # Shepard glissando phase
-        return self.shepard_phase(tau)
+        phase_sum = np.zeros_like(tau, dtype=complex)
+
+        n_vals = np.arange(-p.M_shepard//2, p.M_shepard//2 + 1)
+
+        for n in n_vals:
+            # Axial frequency offset (paper Eq. 2)
+            f_Z_n = n * p.Delta_f
+
+            # Total instantaneous frequency
+            f_total = p.f0 + f_lat + f_Z_n
+
+            # Phase accumulation
+            phi_n = 2 * np.pi * f_total * tau
+
+            # Fading envelope
+            A_n = self.fading_amplitude(f_Z_n)
+
+            if p.use_schroeder_phase:
+                phi_n += self.schroeder_phase(n)
+
+            phase_sum += A_n * np.exp(-1j * phi_n)
+
+        return np.angle(phase_sum)
 
     # def calculate_phase(self, xi: np.ndarray, eta: np.ndarray, t: float,
     #                    use_frequency_reset: bool = True) -> np.ndarray:
@@ -412,6 +437,7 @@ class AODSimulation:
             'params': p
         }
 
+
 def plot_time_snapshot(results: dict, time_index: int, 
                       save_path: str = None, show_phase: bool = True):
     """
@@ -626,7 +652,7 @@ if __name__ == "__main__":
     for i, idx in enumerate(time_indices):
         print(f"\nPlotting time step {idx}...")
         plot_time_snapshot(results, idx,
-                          save_path=f'aod_snapshot_{i}.png')
+                          save_path=f'aod_snapshot_shepard_{i}.png')
 
         # Analyze beam properties
         props = analyze_beam_properties(results, idx)

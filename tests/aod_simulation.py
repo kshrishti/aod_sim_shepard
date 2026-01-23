@@ -25,10 +25,6 @@ from matplotlib.colors import PowerNorm
 class AODParameters:
     """Physical parameters for the AOD system"""
     
-    n_shepard: int = 5          # number of overlapping components
-    shepard_spacing: float = 2.0  # frequency ratio (2 = octave)
-    shepard_sigma: float = 0.4    # envelope width in log-frequency
-
     # RF parameters
     f0: float = 50e6          # Start frequency [Hz]
     f1: float = 80e6          # End frequency [Hz]
@@ -95,106 +91,62 @@ class AODSimulation:
     def __init__(self, params: AODParameters):
         self.params = params
         
-    def shepard_phase(self, tau: np.ndarray) -> np.ndarray:
+    def calculate_phase(self, xi: np.ndarray, eta: np.ndarray, t: float,
+                       use_frequency_reset: bool = True) -> np.ndarray:
         """
-        Shepard–Risset glissando RF phase.
-        Returns the *effective* phase seen by the optical field.
+        Calculate phase at position (xi, eta) and time t
+
+        Models a frequency reset from f₁ → f₀ that propagates through the beam.
+        Different spatial positions sample different parts of the RF waveform due
+        to acoustic propagation delay:
+        - OLD region (xi ≥ xi_disc): Pre-reset RF, at high frequencies (near f₁)
+        - NEW region (xi < xi_disc): Post-reset RF, at low frequencies (near f₀)
+
+        Phase continuity is maintained by adding φ₀ to the old region.
+
+        Args:
+            xi: Transverse position(s) in crystal [m]
+            eta: Transverse position(s) in crystal [m]
+            t: Time [s]
+            use_frequency_reset: If True, uses frequency reset model with φ₀
+                                If False, regions have same phase (no discontinuity)
+
+        Returns:
+            Phase array [rad]
         """
         p = self.params
 
-        # Base chirp
-        f_base = p.f0 + p.alpha * tau
-
-        phase_sum = np.zeros_like(tau, dtype=complex)
-
-        n_vals = np.arange(-(p.n_shepard//2), p.n_shepard//2 + 1)
-
-        for n in n_vals:
-            # Log-spaced frequency offsets
-            f_n = f_base * (p.shepard_spacing ** n)
-
-            # Phase of this component
-            phi_n = 2 * np.pi * (
-                f_n * tau
-            )
-
-            # Smooth envelope in log-frequency
-            log_offset = np.log2(f_n / ((p.f0 + p.f1) / 2))
-            envelope = np.exp(-0.5 * (log_offset / p.shepard_sigma)**2)
-
-            phase_sum += envelope * np.exp(-1j * phi_n)
-
-        return np.angle(phase_sum)
-
-
-    def calculate_phase(self, xi, eta, t, use_frequency_reset=False):
-        p = self.params
-
-        # Acoustic delay
+        # Time delay for acoustic wave propagation
+        # Positive xi means the wave reaches that point later
         tau = t - p.T/2 - xi * p.M / p.V
 
+        # Position of discontinuity wavefront at time t
+        # At t=0, reset occurs and discontinuity is at xi = -p.w0/2 (left edge)
+        # It propagates rightward at velocity V/M
+        xi_disc = -p.w0/2 + p.V * t / p.M
+
         if use_frequency_reset:
-            raise NotImplementedError("Reset model disabled for Shepard tones")
+            # At t=0, the frequency resets from f₁ → f₀ at the transducer
+            # OLD region (xi >= xi_disc): Has NOT seen reset, still at high freq near f₁
+            # NEW region (xi < xi_disc): HAS seen reset, at low freq near f₀
 
-        # Shepard glissando phase
-        return self.shepard_phase(tau)
+            # NEW region: Just reset to f₀, so tau starts from when reset occurred
+            tau_new = tau
+            phi_new = 2 * np.pi * (p.f0 * tau_new + 0.5 * p.alpha * tau_new**2) + p.phi0
 
-    # def calculate_phase(self, xi: np.ndarray, eta: np.ndarray, t: float,
-    #                    use_frequency_reset: bool = True) -> np.ndarray:
-    #     """
-    #     Calculate phase at position (xi, eta) and time t
+            # OLD region: Was chirping before reset, add offset to be near f₁
+            # Time to chirp from f₀ to f₁
+            tau_old = tau + p.chirp_period
+            phi_old = 2 * np.pi * (p.f0 * tau_old + 0.5 * p.alpha * tau_old**2) + p.phi0
 
-    #     Models a frequency reset from f₁ → f₀ that propagates through the beam.
-    #     Different spatial positions sample different parts of the RF waveform due
-    #     to acoustic propagation delay:
-    #     - OLD region (xi ≥ xi_disc): Pre-reset RF, at high frequencies (near f₁)
-    #     - NEW region (xi < xi_disc): Post-reset RF, at low frequencies (near f₀)
+            # Apply the appropriate phase based on position relative to discontinuity
+            phase = np.where(xi >= xi_disc, phi_old, phi_new)
+        else:
+            # No frequency reset - uniform phase (for testing/comparison)
+            phi_base = 2 * np.pi * (p.f0 * tau + 0.5 * p.alpha * tau**2) + p.phi0
+            phase = phi_base
 
-    #     Phase continuity is maintained by adding φ₀ to the old region.
-
-    #     Args:
-    #         xi: Transverse position(s) in crystal [m]
-    #         eta: Transverse position(s) in crystal [m]
-    #         t: Time [s]
-    #         use_frequency_reset: If True, uses frequency reset model with φ₀
-    #                             If False, regions have same phase (no discontinuity)
-
-    #     Returns:
-    #         Phase array [rad]
-    #     """
-    #     p = self.params
-
-    #     # Time delay for acoustic wave propagation
-    #     # Positive xi means the wave reaches that point later
-    #     tau = t - p.T/2 - xi * p.M / p.V
-
-    #     # Position of discontinuity wavefront at time t
-    #     # At t=0, reset occurs and discontinuity is at xi = -p.w0/2 (left edge)
-    #     # It propagates rightward at velocity V/M
-    #     xi_disc = -p.w0/2 + p.V * t / p.M
-
-    #     if use_frequency_reset:
-    #         # At t=0, the frequency resets from f₁ → f₀ at the transducer
-    #         # OLD region (xi >= xi_disc): Has NOT seen reset, still at high freq near f₁
-    #         # NEW region (xi < xi_disc): HAS seen reset, at low freq near f₀
-
-    #         # NEW region: Just reset to f₀, so tau starts from when reset occurred
-    #         tau_new = tau
-    #         phi_new = 2 * np.pi * (p.f0 * tau_new + 0.5 * p.alpha * tau_new**2) + p.phi0
-
-    #         # OLD region: Was chirping before reset, add offset to be near f₁
-    #         # Time to chirp from f₀ to f₁
-    #         tau_old = tau + p.chirp_period
-    #         phi_old = 2 * np.pi * (p.f0 * tau_old + 0.5 * p.alpha * tau_old**2) + p.phi0
-
-    #         # Apply the appropriate phase based on position relative to discontinuity
-    #         phase = np.where(xi >= xi_disc, phi_old, phi_new)
-    #     else:
-    #         # No frequency reset - uniform phase (for testing/comparison)
-    #         phi_base = 2 * np.pi * (p.f0 * tau + 0.5 * p.alpha * tau**2) + p.phi0
-    #         phase = phi_base
-
-    #     return phase
+        return phase
     
     def integrand(self, xi: float, eta: float, u: float, v: float,
                   t: float) -> complex:
@@ -411,6 +363,7 @@ class AODSimulation:
             'phase': phase,
             'params': p
         }
+
 
 def plot_time_snapshot(results: dict, time_index: int, 
                       save_path: str = None, show_phase: bool = True):
