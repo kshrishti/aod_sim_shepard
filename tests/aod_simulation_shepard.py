@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Tuple, Callable
 import matplotlib.pyplot as plt
 from matplotlib.colors import PowerNorm
+from scipy.interpolate import RectBivariateSpline
 
 
 @dataclass
@@ -46,7 +47,7 @@ class AODParameters:
     F: float = 200e-3         # Focal length [m]
     M: float = 1.0            # Magnification before AOD
 
-    # Crystal geometry
+    # Crystal geometryu 7
     crystal_length: float = 7.5e-3  # Crystal length [m]
     beam_position: float = 3.75e-3  # Beam center position from transducer [m]
     
@@ -97,6 +98,34 @@ class AODSimulation:
     def __init__(self, params: AODParameters):
         self.params = params
         
+    def f_center(self, t):
+        """Instantaneous center frequency of the sweep"""
+        p = self.params
+        return p.f0 + (p.f1 - p.f0) * (t / p.T)
+
+    def delta_f(self) -> float:
+        """Chirp range [Hz]"""
+        p = self.params
+        return p.delta_f
+
+    def f_axial(self, n, t):
+        """Axial frequency for Shepard tone n"""
+        return self.f_center(t) + n * self.params.Delta_f
+
+    def f_lateral(self, t):
+        """No lateral scan for now"""
+        return 0.0
+
+    def phi_n(self, n):
+        """Optional Schroeder phase"""
+        if self.params.use_schroeder_phase:
+            return self.schroeder_phase(n)
+        return 0.0
+
+    @property
+    def v_acoustic(self):
+        return self.params.V
+
     def fading_amplitude(self, f_n: float) -> float:
         """
         Implements Eq. (3) from Dan Stamper-Kurn paper.
@@ -104,7 +133,7 @@ class AODSimulation:
         p = self.params
         M = p.M_shepard
         eta = p.eta
-        Delta_f = p.Delta_f
+        Delta_f = p.delta_f
         p_fade = p.p_fade
 
         f_abs = abs(f_n)
@@ -297,27 +326,181 @@ class AODSimulation:
         else:
             raise ValueError(f"Unknown integration method: {integration_method}")
     
+    # def compute_field_grid(self, u_array: np.ndarray, v_array: np.ndarray,
+    #                       t: float,
+    #                       n_points: int = 200) -> np.ndarray:
+    #     """
+    #     Compute electric field on a grid in the focal plane using FFT method
+
+    #     This is much faster than point-by-point integration and suitable for
+    #     visualization. Uses discrete Fourier transform relationship.
+
+    #     Args:
+    #         u_array: 1D array of u coordinates [m]
+    #         v_array: 1D array of v coordinates [m]
+    #         t: Time [s]
+    #         n_points: Number of points for integration grid
+
+    #     Returns:
+    #         2D array of complex electric field values
+    #     """
+    #     p = self.params
+
+    #     # Create integration grid in (xi, eta) space
+    #     xi_max = 3 * p.w0
+    #     eta_max = 3 * p.w0
+
+    #     xi = np.linspace(-xi_max, xi_max, n_points)
+    #     eta = np.linspace(-eta_max, eta_max, n_points)
+    #     XI, ETA = np.meshgrid(xi, eta, indexing='ij')
+
+    #     # Calculate phase on the grid (with frequency reset model)
+    #     phi = self.calculate_phase(XI, ETA, t)
+        
+    #     # Calculate the field in the aperture
+    #     gaussian = np.exp(-(XI**2 + ETA**2) * p.M**2 / p.w0**2)
+    #     quad_phase = np.exp(-1j * p.k * (XI**2 + ETA**2) / (2 * p.F))
+    #     aod_phase = np.exp(-1j * phi)
+        
+    #     aperture_field = aod_phase * gaussian * quad_phase
+        
+    #     # Use FFT to compute Fourier transform
+    #     # The Fourier transform gives us the field in the focal plane
+    #     field_fft = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(aperture_field)))
+        
+    #     # Create frequency arrays corresponding to focal plane coordinates
+    #     d_xi = xi[1] - xi[0]
+    #     d_eta = eta[1] - eta[0]
+        
+    #     freq_xi = np.fft.fftshift(np.fft.fftfreq(n_points, d_xi))
+    #     freq_eta = np.fft.fftshift(np.fft.fftfreq(n_points, d_eta))
+        
+    #     # Convert frequency to focal plane coordinates: u = λF·freq
+    #     u_fft = p.wavelength * p.F * freq_xi
+    #     v_fft = p.wavelength * p.F * freq_eta
+        
+    #     # Interpolate to desired output grid
+    #     from scipy.interpolate import RectBivariateSpline
+        
+    #     interp_real = RectBivariateSpline(u_fft, v_fft, np.real(field_fft))
+    #     interp_imag = RectBivariateSpline(u_fft, v_fft, np.imag(field_fft))
+        
+    #     U, V = np.meshgrid(u_array, v_array, indexing='ij')
+        
+    #     field_real = interp_real.ev(U.ravel(), V.ravel()).reshape(U.shape)
+    #     field_imag = interp_imag.ev(U.ravel(), V.ravel()).reshape(U.shape)
+        
+    #     # Apply proper scaling
+    #     scale = d_xi * d_eta
+        
+    #     return scale * (field_real + 1j * field_imag)
+    
+    # def compute_field_grid(self, u_array, v_array, t, n_points=200):
+    #     """
+    #     Physically correct Shepard-tone focal-plane intensity.
+    #     Incoherent sum over diffraction orders.
+    #     """
+    #     p = self.params
+
+    #     # Integration grid in crystal
+    #     xi_max = 3 * p.w0
+    #     eta_max = 3 * p.w0
+
+    #     xi = np.linspace(-xi_max, xi_max, n_points)
+    #     eta = np.linspace(-eta_max, eta_max, n_points)
+    #     XI, ETA = np.meshgrid(xi, eta, indexing="ij")
+
+    #     gaussian = np.exp(-(XI**2 + ETA**2) * p.M**2 / p.w0**2)
+    #     quad_phase = np.exp(-1j * p.k * (XI**2 + ETA**2) / (2 * p.F))
+
+    #     d_xi = xi[1] - xi[0]
+    #     d_eta = eta[1] - eta[0]
+
+    #     freq_xi = np.fft.fftshift(np.fft.fftfreq(n_points, d_xi))
+    #     freq_eta = np.fft.fftshift(np.fft.fftfreq(n_points, d_eta))
+
+    #     u_fft = p.wavelength * p.F * freq_xi
+    #     v_fft = p.wavelength * p.F * freq_eta
+
+    #     intensity_fft = np.zeros((n_points, n_points))
+
+    #     # Shepard tones
+    #     n_min = -p.M_shepard // 2
+    #     n_max =  p.M_shepard // 2
+
+    #     for n in range(n_min, n_max + 1):
+
+    #         A_n = self.shepard_amplitude(n, t)
+    #         if A_n == 0:
+    #             continue
+
+    #         f_n = self.f_axial(n, t)
+    #         kz = 2 * np.pi * f_n / p.V
+
+    #         phi_n = kz * XI + self.phi_n(n)
+
+    #         aperture_field = (
+    #             np.exp(-1j * phi_n)
+    #             * gaussian
+    #             * quad_phase
+    #         )
+
+    #         field_fft = np.fft.fftshift(
+    #             np.fft.fft2(np.fft.ifftshift(aperture_field))
+    #         )
+
+    #         intensity_fft += (A_n ** 2) * np.abs(field_fft) ** 2
+
+    #     from scipy.interpolate import RectBivariateSpline
+    #     interp_I = RectBivariateSpline(u_fft, v_fft, intensity_fft)
+
+    #     U, V = np.meshgrid(u_array, v_array, indexing="ij")
+    #     intensity = interp_I.ev(U.ravel(), V.ravel()).reshape(U.shape)
+
+    #     return intensity * d_xi * d_eta
+
+    def phase_for_tone(self, n, XI, ETA, t):
+        f_lat = self.f_lateral(t)
+        f_z   = self.f_axial(n, t)
+
+        kx = 2 * np.pi * f_lat / self.v_acoustic
+        kz = 2 * np.pi * f_z   / self.v_acoustic
+
+        return kx * XI + kz * ETA + self.phi_n(n)
+
+    # def shepard_amplitude(self, n: int, t: float) -> float:
+    #     """
+    #     Shepard-tone amplitude envelope A_n(t).
+
+    #     At any time, only two adjacent tones are nonzero,
+    #     and A_n^2 sums to 1.
+    #     """
+    #     # Fractional tone index
+    #     s = self.f_center(t) / self.delta_f()
+
+    #     m = int(np.floor(s))
+    #     alpha = s - m  # in [0, 1)
+
+    #     if n == m:
+    #         return np.cos(0.5 * np.pi * alpha)
+    #     elif n == m + 1:
+    #         return np.sin(0.5 * np.pi * alpha)
+    #     else:
+    #         return 0.0
+
+    # def A_n(self, n, t):
+    #     return self.shepard_amplitude(n, t)
+
     def compute_field_grid(self, u_array: np.ndarray, v_array: np.ndarray,
-                          t: float,
-                          n_points: int = 200) -> np.ndarray:
+                            t: float,
+                            n_points: int = 200) -> np.ndarray:
         """
-        Compute electric field on a grid in the focal plane using FFT method
-
-        This is much faster than point-by-point integration and suitable for
-        visualization. Uses discrete Fourier transform relationship.
-
-        Args:
-            u_array: 1D array of u coordinates [m]
-            v_array: 1D array of v coordinates [m]
-            t: Time [s]
-            n_points: Number of points for integration grid
-
-        Returns:
-            2D array of complex electric field values
+        Compute intensity in the focal plane for Shepard-faded AOD tones.
+        Uses incoherent sum over diffraction orders (physically correct).
         """
         p = self.params
 
-        # Create integration grid in (xi, eta) space
+        # Integration grid in (xi, eta)
         xi_max = 3 * p.w0
         eta_max = 3 * p.w0
 
@@ -325,47 +508,59 @@ class AODSimulation:
         eta = np.linspace(-eta_max, eta_max, n_points)
         XI, ETA = np.meshgrid(xi, eta, indexing='ij')
 
-        # Calculate phase on the grid (with frequency reset model)
-        phi = self.calculate_phase(XI, ETA, t)
-        
-        # Calculate the field in the aperture
+        # Common aperture factors
         gaussian = np.exp(-(XI**2 + ETA**2) * p.M**2 / p.w0**2)
         quad_phase = np.exp(-1j * p.k * (XI**2 + ETA**2) / (2 * p.F))
-        aod_phase = np.exp(-1j * phi)
-        
-        aperture_field = aod_phase * gaussian * quad_phase
-        
-        # Use FFT to compute Fourier transform
-        # The Fourier transform gives us the field in the focal plane
-        field_fft = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(aperture_field)))
-        
-        # Create frequency arrays corresponding to focal plane coordinates
+
+        # FFT coordinate setup (unchanged)
         d_xi = xi[1] - xi[0]
         d_eta = eta[1] - eta[0]
-        
+
         freq_xi = np.fft.fftshift(np.fft.fftfreq(n_points, d_xi))
         freq_eta = np.fft.fftshift(np.fft.fftfreq(n_points, d_eta))
-        
-        # Convert frequency to focal plane coordinates: u = λF·freq
+
         u_fft = p.wavelength * p.F * freq_xi
         v_fft = p.wavelength * p.F * freq_eta
-        
-        # Interpolate to desired output grid
-        from scipy.interpolate import RectBivariateSpline
-        
-        interp_real = RectBivariateSpline(u_fft, v_fft, np.real(field_fft))
-        interp_imag = RectBivariateSpline(u_fft, v_fft, np.imag(field_fft))
-        
+        # print(u_fft.min()*1e3, u_fft.max()*1e3)
+
+        # Total intensity accumulator
+        intensity_fft = np.zeros((n_points, n_points), dtype=float)
+
+        # --- LOOP OVER SHEPARD TONES ---
+        for n in range(int(-p.M), int(p.M + 1)):
+
+            A_n = self.A_n(n, t)
+            if A_n == 0:
+                continue
+
+            # Phase for THIS tone only
+            phi_n = self.phase_for_tone(n, XI, ETA, t)
+
+            aperture_field_n = (
+                np.exp(-1j * phi_n)
+                * gaussian
+                * quad_phase
+            )
+
+            # FFT to focal plane
+            field_fft_n = np.fft.fftshift(
+                np.fft.fft2(np.fft.ifftshift(aperture_field_n))
+            )
+
+            # Incoherent intensity sum
+            intensity_fft += (A_n ** 2) * np.abs(field_fft_n) ** 2
+
+        # Interpolate intensity to requested (u, v) grid
+        interp_I = RectBivariateSpline(u_fft, v_fft, intensity_fft)
+
         U, V = np.meshgrid(u_array, v_array, indexing='ij')
-        
-        field_real = interp_real.ev(U.ravel(), V.ravel()).reshape(U.shape)
-        field_imag = interp_imag.ev(U.ravel(), V.ravel()).reshape(U.shape)
-        
-        # Apply proper scaling
+        intensity = interp_I.ev(U.ravel(), V.ravel()).reshape(U.shape)
+
+        # Proper scaling
         scale = d_xi * d_eta
-        
-        return scale * (field_real + 1j * field_imag)
-    
+
+        return scale * intensity
+
     def simulate_time_series(self, n_time_steps: int,
                             u_range: Tuple[float, float],
                             v_range: Tuple[float, float],
@@ -404,38 +599,117 @@ class AODSimulation:
         v = np.linspace(v_range[0], v_range[1], n_spatial_points)
 
         # Preallocate arrays
-        field = np.zeros((n_time_steps, n_spatial_points, n_spatial_points),
-                        dtype=complex)
+        # field = np.zeros((n_time_steps, n_spatial_points, n_spatial_points),
+        #                 dtype=complex)
 
-        print(f"Simulating {n_time_steps} time steps...")
-        print(f"Transit time: {p.T*1e6:.3f} μs")
-        print(f"Chirp rate: {p.alpha/1e12:.3f} MHz/μs")
-        print(f"Frequency range: {p.f0/1e6:.1f} - {p.f1/1e6:.1f} MHz")
-        print(f"Phase offset for continuity: {p.phi0_for_continuity:.3f} rad = {p.phi0_for_continuity/(2*np.pi):.3f} cycles")
+        # print(f"Simulating {n_time_steps} time steps...")
+        # print(f"Transit time: {p.T*1e6:.3f} μs")
+        # print(f"Chirp rate: {p.alpha/1e12:.3f} MHz/μs")
+        # print(f"Frequency range: {p.f0/1e6:.1f} - {p.f1/1e6:.1f} MHz")
+        # print(f"Phase offset for continuity: {p.phi0_for_continuity:.3f} rad = {p.phi0_for_continuity/(2*np.pi):.3f} cycles")
 
-        # Compute field at each time step
+        # # Compute field at each time step
+        # for i, t in enumerate(time):
+        #     print(f"  Computing time step {i+1}/{n_time_steps} (t = {t*1e6:.3f} μs)...",
+        #           end='\r')
+
+        #     field[i] = self.compute_field_grid(u, v, t,
+        #                                       n_points=n_integration_points)
+        
+        # print("\nSimulation complete!")
+        
+        # # Calculate intensity and phase
+        # intensity = np.abs(field)**2
+        # phase = np.angle(field)
+        
+        # return {
+        #     'time': time,
+        #     'u': u,
+        #     'v': v,
+        #     'field': field,
+        #     'intensity': intensity,
+        #     'phase': phase,
+        #     'params': p
+        # }
+        intensity = np.zeros((n_time_steps, n_spatial_points, n_spatial_points))
+
         for i, t in enumerate(time):
-            print(f"  Computing time step {i+1}/{n_time_steps} (t = {t*1e6:.3f} μs)...",
-                  end='\r')
+            intensity[i] = self.compute_field_grid(u, v, t,
+                                                n_points=n_integration_points)
 
-            field[i] = self.compute_field_grid(u, v, t,
-                                              n_points=n_integration_points)
-        
-        print("\nSimulation complete!")
-        
-        # Calculate intensity and phase
-        intensity = np.abs(field)**2
-        phase = np.angle(field)
-        
         return {
-            'time': time,
-            'u': u,
-            'v': v,
-            'field': field,
-            'intensity': intensity,
-            'phase': phase,
-            'params': p
+            "time": time,
+            "u": u,
+            "v": v,
+            "intensity": intensity,
+            "params": p
         }
+
+    def beam_metrics(self, U, V, field):
+        """
+        Compute waist, total intensity, and astigmatism
+        from complex field E(x,y).
+        """
+        I = np.abs(field)**2
+        Itot = I.sum()
+
+        # centroids
+        x0 = (U * I).sum() / Itot
+        y0 = (V * I).sum() / Itot
+
+        # second moments
+        x2 = ((U - x0)**2 * I).sum() / Itot
+        y2 = ((V - y0)**2 * I).sum() / Itot
+
+        wx = 2 * np.sqrt(x2)
+        wy = 2 * np.sqrt(y2)
+
+        astig = (x2 - y2) / (x2 + y2)
+
+        return wx, wy, Itot, astig
+
+    def plot_beam_metrics(self, u_array: np.ndarray, v_array: np.ndarray, T, Nt):
+        times = np.linspace(0, T, Nt)
+
+        wx_list, wy_list = [], []
+        I_list, astig_list = [], []
+
+        for t in times:
+            field = self.compute_field_grid(u_array, v_array, t)
+
+            U, V = np.meshgrid(u_array, v_array, indexing='ij')
+            wx, wy, Itot, astig = self.beam_metrics(U, V, field)
+
+            wx_list.append(wx)
+            wy_list.append(wy)
+            I_list.append(Itot)
+            astig_list.append(astig)
+
+        wx = np.array(wx_list)
+        wy = np.array(wy_list)
+        I = np.array(I_list)
+        astig = np.array(astig_list)
+
+        I_norm = I / np.mean(I)
+
+        fig, axs = plt.subplots(3, 1, sharex=True, figsize=(7, 6))
+
+        axs[0].plot(times * 1e6, wx * 1e6, label=r"$w_x$")
+        axs[0].plot(times * 1e6, wy * 1e6, label=r"$w_y$")
+        axs[0].set_ylabel("Waist (µm)")
+        axs[0].legend()
+
+        axs[1].plot(times * 1e6, I_norm, color="green")
+        axs[1].set_ylabel("Intensity")
+
+        axs[2].plot(times * 1e6, astig, color="red")
+        axs[2].set_ylabel("Astigmatism")
+        axs[2].set_xlabel("Time (µs)")
+
+        plt.tight_layout()
+        plt.show()
+
+
 
 
 def plot_time_snapshot(results: dict, time_index: int, 
@@ -452,14 +726,14 @@ def plot_time_snapshot(results: dict, time_index: int,
     u = results['u'] * 1e3  # Convert to mm
     v = results['v'] * 1e3
     intensity = results['intensity'][time_index]
-    phase = results['phase'][time_index]
+    # phase = results['phase'][time_index]
     t = results['time'][time_index] * 1e6  # Convert to μs
     T = results['params'].T * 1e6
     
-    if show_phase:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-    else:
-        fig, ax1 = plt.subplots(1, 1, figsize=(8, 6))
+    # if show_phase:
+    #     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    # else:
+    fig, ax1 = plt.subplots(1, 1, figsize=(8, 6))
     
     # Intensity plot
     im1 = ax1.imshow(intensity.T, extent=[u[0], u[-1], v[0], v[-1]],
@@ -470,15 +744,15 @@ def plot_time_snapshot(results: dict, time_index: int,
     ax1.set_title(f'Intensity at t = {t:.3f} μs (t/T = {t/T:.2f})')
     plt.colorbar(im1, ax=ax1, label='|E|²')
     
-    if show_phase:
-        # Phase plot
-        im2 = ax2.imshow(phase.T, extent=[u[0], u[-1], v[0], v[-1]],
-                        origin='lower', aspect='auto', cmap='twilight',
-                        vmin=-np.pi, vmax=np.pi)
-        ax2.set_xlabel('u [mm]')
-        ax2.set_ylabel('v [mm]')
-        ax2.set_title(f'Phase at t = {t:.3f} μs')
-        plt.colorbar(im2, ax=ax2, label='arg(E) [rad]')
+    # if show_phase:
+    #     # Phase plot
+    #     im2 = ax2.imshow(phase.T, extent=[u[0], u[-1], v[0], v[-1]],
+    #                     origin='lower', aspect='auto', cmap='twilight',
+    #                     vmin=-np.pi, vmax=np.pi)
+    #     ax2.set_xlabel('u [mm]')
+    #     ax2.set_ylabel('v [mm]')
+    #     ax2.set_title(f'Phase at t = {t:.3f} μs')
+    #     plt.colorbar(im2, ax=ax2, label='arg(E) [rad]')
     
     plt.tight_layout()
     
@@ -670,3 +944,9 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("Simulation complete!")
     print("=" * 60)
+
+    # print(f'urange: {u_range[0], u_range[1]}')
+    sim.plot_beam_metrics(u_array=np.linspace(-8.5e-3, 8.5e-3, 200), 
+                            v_array=np.linspace(-8.5e-3, 8.5e-3, 200),
+                            T=3e-7, 
+                            Nt=10)
